@@ -17,9 +17,9 @@
       "applicationUrl": "http://localhost:8080",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
-        "APS_CLIENT_ID": "QZGNPLGhzTAo9YSlAvNqTeTuJsEezS2K",
-        "APS_CLIENT_SECRET": "78KhzXdqiybQrcUe",
-        "APS_WEBHOOK_URL": "https://e010-213-184-251-195.eu.ngrok.io"
+        "APS_CLIENT_ID": "",
+        "APS_CLIENT_SECRET": "",
+        "APS_WEBHOOK_URL": ""
       }
     },
     "IIS Express": {
