@@ -120,7 +120,7 @@ namespace DesignAutomationApp.Controllers
             string packageZipPath = Path.Combine(LocalBundlesFolder, zipFileName + ".zip");
             if (!System.IO.File.Exists(packageZipPath))
             {
-                throw new ArgumentException("Appbundle not found at " +  packageZipPath);
+                throw new ArgumentException("Appbundle not found at " + packageZipPath);
             }
 
             Page<string> appBundles = await designAutomation.GetAppBundlesAsync();
@@ -192,7 +192,139 @@ namespace DesignAutomationApp.Controllers
                 }
             }
 
-            return Ok(new {AppBundle = qualifiedAppBundleId, Version = newAppVersion.Version});
+            return Ok(new { AppBundle = qualifiedAppBundleId, Version = newAppVersion.Version });
+        }
+
+        /// <summary>
+        /// Define a new activity
+        /// </summary>
+        [HttpPost]
+        [Route("api/aps/designautomation/activities")]
+        public async Task<IActionResult> CreateActivity([FromBody] JObject activitySpecs)
+        {
+            string zipFileName = activitySpecs["zipFileName"].Value<string>();
+            string engineName = activitySpecs["engine"].Value<string>();
+
+            string appBundleName = zipFileName + "AppBundle";
+            string activityName = zipFileName + "Activity";
+
+            Page<string> activities = await designAutomation.GetActivitiesAsync();
+            string qualifiedActivityId = string.Format($"{NickName}.{activityName}+{Alias}");
+
+            if (!activities.Data.Contains(qualifiedActivityId))
+            {
+                dynamic engineAttributes = EngineAttributes(engineName);
+                string commandLine = string.Format(engineAttributes.commandLine, appBundleName);
+                Activity activitySpec = new Activity()
+                {
+                    Id = activityName,
+                    Appbundles = new List<string>()
+                    {
+                        string.Format($"{NickName}.{appBundleName}+{Alias}")
+                    },
+                    CommandLine = new List<string>()
+                    {
+                        commandLine
+                    },
+                    Engine = engineName,
+                    Parameters = new Dictionary<string, Parameter>()
+                    {
+                        { "inputFile", new Parameter() { Description = "input file", LocalName = "$(inputFile)", Ondemand = false, Required = true, Verb = Verb.Get, Zip = false } },
+                        { "inputJson", new Parameter() { Description = "input json", LocalName = "params.json", Ondemand = false, Required = false, Verb = Verb.Get, Zip = false } },
+                        { "outputFile", new Parameter() { Description = "output file", LocalName = "outputFile." + engineAttributes.extension, Ondemand = false, Required = true, Verb = Verb.Put, Zip = false } }
+                    },
+                    Settings = new Dictionary<string, ISetting>()
+                    {
+                        { "script", new StringSetting() {Value = engineAttributes.script } }
+                    }
+                };
+
+                Activity newActivity = await designAutomation.CreateActivityAsync(activitySpec);
+
+                Alias aliasSpec = new Alias() { Id = Alias, Version = 1 };
+                Alias newAlias = await designAutomation.CreateActivityAliasAsync(activityName, aliasSpec);
+
+                return Ok(new { Activity = qualifiedActivityId });
+            }
+
+            return Ok(new { Activity = "Activity already defined" });
+        }
+
+
+        [HttpGet]
+        [Route("api/aps/designautomation/activities")]
+        public async Task<List<string>> GetDefinedActivities()
+        {
+            Page<string> activities = await designAutomation.GetActivitiesAsync();
+            List<string> definedActivities = new List<string>();
+            foreach (string activity in activities.Data)
+            {
+                if (activity.StartsWith(NickName) && activity.IndexOf("$LATEST") == -1)
+                {
+                    definedActivities.Add(activity.Replace(NickName + ".", String.Empty));
+                }
+            }
+
+            return definedActivities;
+        }
+
+        /// <summary>
+        /// Clear the accounts (for debugging purposes)
+        /// </summary>
+        [HttpDelete]
+        [Route("api/aps/designautomation/account")]
+        public async Task<IActionResult> ClearAccount()
+        {
+            await designAutomation.DeleteForgeAppAsync("me");
+            return Ok();
+        }
+
+        /// <summary>
+        /// Helps identify the engine
+        /// </summary>
+        private dynamic EngineAttributes(string engine)
+        {
+            if (engine.Contains("3dsMax"))
+            {
+                return new
+                {
+                    commandLine = "$(engine.path)\\3dsmaxbatch.exe -sceneFile \"$(args[inputFile].path)\" $(settings[script].path)",
+                    extension = "max",
+                    script = "da = dotNetClass(\"Autodesk.Forge.Sample.DesignAutomation.Max.RuntimeExecute\")\nda.ModifyWindowWidthHeight()\n"
+                };
+            }
+
+            if (engine.Contains("AutoCAD"))
+            {
+                return new
+                {
+                    commandLine = "$(engine.path)\\accoreconsole.exe /i \"$(args[inputFile].path)\" /al \"$(appbundles[{0}].path)\" /s $(settings[script].path)",
+                    extension = "dwg",
+                    script = "UpdateParam\n"
+                };
+            }
+
+            if (engine.Contains("Inventor"))
+            {
+                return new
+                {
+                    commandLine = "$(engine.path)\\inventorcoreconsole.exe /i \"$(args[inputFile].path)\" /al \"$(appbundles[{0}].path)\"",
+                    extension = "ipt",
+                    script = string.Empty
+                };
+            }
+
+            if (engine.Contains("Revit"))
+            {
+                return new
+                {
+                    commandLine = "$(engine.path)\\revitcoreconsole.exe /i \"$(args[inputFile].path)\" /al \"$(appbundles[{0}].path)\"",
+                    extension = "rvt",
+                    script = string.Empty
+                };
+            }
+
+            throw new ArgumentException("Invalid engine");
         }
     }
 
