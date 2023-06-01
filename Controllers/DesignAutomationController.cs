@@ -1,9 +1,12 @@
-﻿using Autodesk.Forge.DesignAutomation;
+﻿using Autodesk.Forge;
+using Autodesk.Forge.Core;
+using Autodesk.Forge.DesignAutomation;
 using Autodesk.Forge.DesignAutomation.Model;
 using Autodesk.Forge.Model;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Activity = Autodesk.Forge.DesignAutomation.Model.Activity;
 using Alias = Autodesk.Forge.DesignAutomation.Model.Alias;
@@ -280,6 +283,174 @@ namespace DesignAutomationApp.Controllers
         }
 
         /// <summary>
+        /// Direct To S3
+        /// </summary>
+        static void onUploadProgress(float progress, TimeSpan elapsed, List<UploadItemDesc> objects)
+        {
+            Console.WriteLine($"progress: {progress} elapsed: {elapsed} objects: {string.Join(".", objects)}");
+        }
+
+        public static async Task<string> GetObjectId(string bucketKey,
+                                                     string objectKey,
+                                                     dynamic oauth,
+                                                     string fileSavePath)
+        {
+            try
+            {
+                ObjectsApi objectsApi= new ObjectsApi();
+                objectsApi.Configuration.AccessToken = oauth.access_token;
+                List<UploadItemDesc> uploadRes = await objectsApi.uploadResources(
+                    bucketKey,
+                    new List<UploadItemDesc>
+                    {
+                        new UploadItemDesc(objectKey, await System.IO.File.ReadAllBytesAsync(fileSavePath))
+                    },
+                    null,
+                    onUploadProgress,
+                    null);
+                Console.WriteLine("**** Upload object(s) response(s):");
+                DynamicDictionary objValues = uploadRes[0].completed;
+                objValues.Dictionary.TryGetValue("objectId", out var id);
+
+                return id?.ToString();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Exception when preparing input url:{ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Start a new workitem
+        /// </summary>
+        [HttpPost]
+        [Route("api/aps/designautomation/workitems")]
+        public async Task<IActionResult> StartWorkitem([FromForm] StartWorkitemInput input)
+        {
+            JObject workItemData = JObject.Parse(input.data);
+            string widthParam = workItemData["width"].Value<string>();
+            string heightParam = workItemData["height"].Value<string>();
+            string activityName = string.Format($"{NickName}.{workItemData["activityName"].Value<string>()}");
+            string browserConnectionId = workItemData["browserConnectionId"].Value<string>();
+
+            var fileSavePath = Path.Combine(this.env.ContentRootPath, Path.GetFileName(input.inputFile.FileName));
+            using (var stream = new FileStream(fileSavePath, FileMode.Create))
+            {
+                await input.inputFile.CopyToAsync(stream);
+            }
+
+            dynamic oauth = await OAuthController.GetInternalAsync();
+
+            string bucketKey = NickName.ToLower() + "-designautomation";
+            BucketsApi buckets = new BucketsApi();
+            buckets.Configuration.AccessToken = oauth.access_token;
+            try
+            {
+                PostBucketsPayload bucketsPayload = new PostBucketsPayload(bucketKey, null,
+                                                                           PostBucketsPayload.PolicyKeyEnum.Transient);
+                await buckets.CreateBucketAsync(bucketsPayload, "US");
+            }
+            catch (Exception ex)
+            {
+            }
+
+            string inputFileNameOSS = string.Format($"{DateTime.Now.ToString("yyyyMMddhhmmss")}_input_{Path.GetFileName(input.inputFile.FileName)}");
+
+            XrefTreeArgument inputFileArgument = new XrefTreeArgument()
+            {
+                Url = await GetObjectId(bucketKey, inputFileNameOSS, oauth, fileSavePath),
+                Headers = new Dictionary<string, string>()
+                {
+                    {"Authorization", "Bearer" + oauth.access_token}
+                }
+            };
+
+            dynamic inputJson = new JObject();
+            inputJson.Width = widthParam;
+            inputJson.Height = heightParam;
+            XrefTreeArgument inputJsonArgument = new XrefTreeArgument()
+            {
+                Url = "data:application/json, " + ((JObject)inputJson).ToString(Formatting.None).Replace("\"", "'")
+            };
+
+            string outputFileNameOSS = string.Format($"{DateTime.Now.ToString("yyyyMMddhhmmss")}_output_{Path.GetFileName(input.inputFile.FileName)}");
+
+            XrefTreeArgument outputFileArgument = new XrefTreeArgument()
+            {
+                Url = await GetObjectId(bucketKey, outputFileNameOSS, oauth, fileSavePath),
+                Headers = new Dictionary<string, string>()
+                {
+                    { "Authorization", "Bearer" + oauth.access_token }
+                },
+                Verb = Verb.Put
+            };
+
+            if (System.IO.File.Exists(fileSavePath))
+            {
+                System.IO.File.Delete(fileSavePath);
+            }
+
+            string callbackUrl = string.Format("{0}/api/aps/callback/designautomation?id={1}&outputFileName={2}",
+                                               OAuthController.GetAppSetting("APS_WEBHOOK_URL"), browserConnectionId,
+                                               outputFileNameOSS);
+
+            WorkItem workItemSpec = new WorkItem()
+            {
+                ActivityId = activityName,
+                Arguments = new Dictionary<string, IArgument>()
+                {
+                    { "inputFile", inputFileArgument },
+                    { "inputJson", inputJsonArgument },
+                    { "outputFile", outputFileArgument },
+                    { "onComplete", new XrefTreeArgument { Verb = Verb.Post, Url = callbackUrl} }
+                }
+            };
+            WorkItemStatus workItemStatus = await designAutomation.CreateWorkItemAsync(workItemSpec);
+
+            return Ok(new { WorkItemId = workItemStatus.Id });
+        }
+
+        [HttpPost]
+        [Route("api/aps/callback/designautomation")]
+        public async Task<IActionResult> OnCallback(string id, string outputFileName, [FromBody] dynamic body)
+        {
+            try
+            {
+                JObject bodyJson = JObject.Parse((string)body.ToString());
+                await this.hubContext.Clients.Client(id).SendAsync("onComplete", bodyJson.ToString());
+
+                using (var httpClient = new HttpClient())
+                {
+                    byte[] bs = await httpClient.GetByteArrayAsync(bodyJson["reportUrl"]?.Value<string>());
+                    string report = System.Text.Encoding.Default.GetString(bs);
+                    await this.hubContext.Clients.Client(id).SendAsync("onComplete", report);
+                }
+
+                dynamic oauth = await OAuthController.GetInternalAsync();
+
+                ObjectsApi objectsApi = new ObjectsApi();
+                objectsApi.Configuration.AccessToken = oauth.access_token;
+
+                Autodesk.Forge.Client.ApiResponse<dynamic> res = await objectsApi.getS3DownloadURLAsyncWithHttpInfo(
+                                            NickName.ToLower() + "-designautomation",
+                                            outputFileName, new Dictionary<string, object> {
+                                            { "minutesExpiration", 15.0 },
+                                            { "useCdn", true }
+                                            });
+
+                await this.hubContext.Clients.Client(id).SendAsync("downloadResult", (string)(res.Data.url));
+                Console.WriteLine("Congrats!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+
+            return Ok();
+        }
+
+        /// <summary>
         /// Helps identify the engine
         /// </summary>
         private dynamic EngineAttributes(string engine)
@@ -326,6 +497,15 @@ namespace DesignAutomationApp.Controllers
 
             throw new ArgumentException("Invalid engine");
         }
+    }
+
+    /// <summary>
+    /// Input for StartWorkitem
+    /// </summary>
+    public class StartWorkitemInput
+    {
+        public IFormFile inputFile { get; set; }
+        public string data { get; set; }
     }
 
     /// <summary>

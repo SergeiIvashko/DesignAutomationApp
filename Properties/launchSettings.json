@@ -19,7 +19,7 @@
         "ASPNETCORE_ENVIRONMENT": "Development",
         "APS_CLIENT_ID": "QZGNPLGhzTAo9YSlAvNqTeTuJsEezS2K",
         "APS_CLIENT_SECRET": "78KhzXdqiybQrcUe",
-        "APS_WEBHOOK_URL": "https://ed78-213-184-251-195.eu.ngrok.io"
+        "APS_WEBHOOK_URL": "https://e010-213-184-251-195.eu.ngrok.io"
       }
     },
     "IIS Express": {
